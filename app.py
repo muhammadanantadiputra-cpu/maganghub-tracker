@@ -3,10 +3,15 @@ import pandas as pd
 import streamlit as st
 import re
 import os
+import subprocess
 from playwright.sync_api import sync_playwright
 
-# 1. PERINTAH OTOMATIS INSTALL CHROMIUM DI LINUX CLOUD
-os.system("playwright install chromium")
+# Fungsi untuk memastikan Chromium terinstall di Cloud Linux
+def ensure_playwright_installed():
+    try:
+        subprocess.run(["playwright", "install", "chromium"], check=True)
+    except Exception as e:
+        st.error(f"Gagal menginstall browser Chromium: {e}")
 
 # ==========================================
 # 1. DATABASE SETUP
@@ -45,9 +50,10 @@ def init_db():
 init_db()
 
 # ==========================================
-# 2. ULTRA-STABLE PLAYWRIGHT SCRAPER
+# 2. PLAYWRIGHT SCRAPER (CLOUD LINUX COMPATIBLE)
 # ==========================================
 def scrape_all_225_maganghub_stable(status_box, progress_bar):
+    ensure_playwright_installed()
     base_url = "https://maganghub.kemnaker.go.id/magang-nasional/lowongan?keyword=&city_id%5B0%5D%5Bid%5D=49e68da2-eaa7-401c-b4e4-0feaf679287f&city_id%5B0%5D%5Blabel%5D=Kota%20Pekanbaru"
     extracted_jobs = []
     seen_links = set()
@@ -55,8 +61,20 @@ def scrape_all_225_maganghub_stable(status_box, progress_bar):
     
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+            # ARGUMEN WAJIB SERVER LINUX CLOUD
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu"
+                ]
+            )
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+            )
+            page = context.new_page()
             
             current_page = 1
             max_pages = 20
@@ -66,7 +84,7 @@ def scrape_all_225_maganghub_stable(status_box, progress_bar):
                 progress_percent = min(current_page / 15.0, 1.0)
                 progress_bar.progress(progress_percent)
                 status_box.update(
-                    label=f"⏳ [Halaman {current_page}] Menyapu & mengunci seluruh kartu... ({len(extracted_jobs)} lowongan unik)",
+                    label=f"⏳ [Halaman {current_page}] Menyapu & mengunci kartu... ({len(extracted_jobs)} lowongan terkumpul)",
                     state="running"
                 )
                 
@@ -74,7 +92,7 @@ def scrape_all_225_maganghub_stable(status_box, progress_bar):
                 page.goto(page_url, timeout=40000, wait_until="domcontentloaded")
                 
                 try:
-                    page.wait_for_selector("a[href*='/lowongan/']", state="visible", timeout=8000)
+                    page.wait_for_selector("a[href*='/lowongan/']", state="visible", timeout=10000)
                 except:
                     empty_page_streak += 1
                     if empty_page_streak >= 2:
@@ -82,7 +100,8 @@ def scrape_all_225_maganghub_stable(status_box, progress_bar):
                     current_page += 1
                     continue
                 
-                for i in range(5):
+                # Scroll untuk memicu render Next.js
+                for i in range(4):
                     page.evaluate(f"window.scrollTo(0, {i * 400});")
                     page.wait_for_timeout(300)
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
@@ -144,6 +163,10 @@ def scrape_all_225_maganghub_stable(status_box, progress_bar):
             
             browser.close()
             
+        if not extracted_jobs:
+            status_box.update(label="⚠️ Gagal mengambil data (0 lowongan). Silakan coba lagi.", state="error")
+            return False, "Data kosong"
+
         conn = get_connection()
         cursor = conn.cursor()
         
@@ -162,7 +185,7 @@ def scrape_all_225_maganghub_stable(status_box, progress_bar):
         
         progress_bar.progress(1.0)
         status_box.update(
-            label=f"✅ Selesai 100%! Berhasil mengunci total {inserted_count} data ASLI tanpa ada yang terlewat!",
+            label=f"✅ Selesai 100%! Berhasil mengunci total {inserted_count} data ASLI!",
             state="complete"
         )
         return True, f"Sukses menyinkronkan total {inserted_count} lowongan asli Pekanbaru!"
@@ -172,6 +195,7 @@ def scrape_all_225_maganghub_stable(status_box, progress_bar):
         return False, str(e)
 
 def refresh_favorites_live():
+    ensure_playwright_installed()
     conn = get_connection()
     fav_df = pd.read_sql_query("SELECT id, link FROM vacancies WHERE is_favorite = 1", conn)
     conn.close()
@@ -182,7 +206,10 @@ def refresh_favorites_live():
     updated_count = 0
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+            )
             page = browser.new_page()
             
             conn = get_connection()
