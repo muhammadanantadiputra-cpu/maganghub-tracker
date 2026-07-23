@@ -1,17 +1,8 @@
 import sqlite3
 import pandas as pd
 import streamlit as st
+import requests
 import re
-import os
-import subprocess
-from playwright.sync_api import sync_playwright
-
-# Fungsi untuk memastikan Chromium terinstall di Cloud Linux
-def ensure_playwright_installed():
-    try:
-        subprocess.run(["playwright", "install", "chromium"], check=True)
-    except Exception as e:
-        st.error(f"Gagal menginstall browser Chromium: {e}")
 
 # ==========================================
 # 1. DATABASE SETUP
@@ -50,121 +41,97 @@ def init_db():
 init_db()
 
 # ==========================================
-# 2. PLAYWRIGHT SCRAPER (CLOUD LINUX COMPATIBLE)
+# 2. FAST API SCRAPER (NO PLAYWRIGHT NEEDED)
 # ==========================================
-def scrape_all_225_maganghub_stable(status_box, progress_bar):
-    ensure_playwright_installed()
-    base_url = "https://maganghub.kemnaker.go.id/magang-nasional/lowongan?keyword=&city_id%5B0%5D%5Bid%5D=49e68da2-eaa7-401c-b4e4-0feaf679287f&city_id%5B0%5D%5Blabel%5D=Kota%20Pekanbaru"
+def scrape_all_maganghub_api(status_box, progress_bar):
     extracted_jobs = []
-    seen_links = set()
     default_logo = "https://maganghub.kemnaker.go.id/favicon.ico"
     
+    # Headers agar permintaan menyerupai browser resmi
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://maganghub.kemnaker.go.id/magang-nasional/lowongan"
+    }
+    
+    # Endpoint API internal Maganghub Kemnaker khusus Kota Pekanbaru
+    city_id = "49e68da2-eaa7-401c-b4e4-0feaf679287f"
+    
     try:
-        with sync_playwright() as p:
-            # ARGUMEN WAJIB SERVER LINUX CLOUD
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu"
-                ]
+        current_page = 1
+        total_pages = 15
+        
+        while current_page <= total_pages:
+            progress_bar.progress(min(current_page / 15.0, 1.0))
+            status_box.update(
+                label=f"⚡ [Halaman {current_page}] Mengambil data API kilat... ({len(extracted_jobs)} lowongan)",
+                state="running"
             )
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-            )
-            page = context.new_page()
             
-            current_page = 1
-            max_pages = 20
-            empty_page_streak = 0
+            api_url = f"https://maganghub.kemnaker.go.id/api/v1/vacancies?keyword=&city_id={city_id}&page={current_page}&limit=20"
             
-            while current_page <= max_pages:
-                progress_percent = min(current_page / 15.0, 1.0)
-                progress_bar.progress(progress_percent)
-                status_box.update(
-                    label=f"⏳ [Halaman {current_page}] Menyapu & mengunci kartu... ({len(extracted_jobs)} lowongan terkumpul)",
-                    state="running"
-                )
+            try:
+                response = requests.get(api_url, headers=headers, timeout=10)
                 
-                page_url = f"{base_url}&page={current_page}" if current_page > 1 else base_url
-                page.goto(page_url, timeout=40000, wait_until="domcontentloaded")
-                
-                try:
-                    page.wait_for_selector("a[href*='/lowongan/']", state="visible", timeout=10000)
-                except:
-                    empty_page_streak += 1
-                    if empty_page_streak >= 2:
-                        break
-                    current_page += 1
-                    continue
-                
-                # Scroll untuk memicu render Next.js
-                for i in range(4):
-                    page.evaluate(f"window.scrollTo(0, {i * 400});")
-                    page.wait_for_timeout(300)
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
-                page.wait_for_timeout(800)
-                
-                links = page.query_selector_all("a[href*='/lowongan/']")
-                
-                if len(links) < 15 and current_page < 13:
-                    page.wait_for_timeout(1500)
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
-                    links = page.query_selector_all("a[href*='/lowongan/']")
-                
-                if not links:
-                    empty_page_streak += 1
-                    if empty_page_streak >= 2:
-                        break
-                    current_page += 1
-                    continue
-                
-                empty_page_streak = 0
-                new_items_in_this_page = 0
-                
-                for index, a_tag in enumerate(links):
-                    href = a_tag.get_attribute("href") or ""
-                    text_content = a_tag.inner_text().strip()
+                # Jika API internal JSON memberikan data
+                if response.status_code == 200:
+                    json_data = response.json()
+                    jobs_list = json_data.get('data', []) or json_data.get('vacancies', [])
                     
-                    if text_content and len(text_content) > 3 and "Reset" not in text_content and "Kembali" not in text_content:
-                        full_link = f"https://maganghub.kemnaker.go.id{href}" if href.startswith("/") else href
+                    if not jobs_list:
+                        break
                         
-                        if full_link in seen_links:
-                            continue
+                    for job in jobs_list:
+                        title = job.get('title') or job.get('position_name') or "Lowongan Pekanbaru"
+                        company = job.get('company_name') or job.get('institution_name') or (job.get('company', {}).get('name') if isinstance(job.get('company'), dict) else "Instansi Pekanbaru")
+                        job_id = job.get('id') or job.get('slug')
+                        full_link = f"https://maganghub.kemnaker.go.id/magang-nasional/lowongan/{job_id}" if job_id else "https://maganghub.kemnaker.go.id/magang-nasional/lowongan"
                         
-                        lines = [line.strip() for line in text_content.split("\n") if line.strip()]
-                        title = lines[0] if len(lines) > 0 else f"Lowongan Pekanbaru #{len(extracted_jobs)+1}"
-                        company = lines[1] if len(lines) > 1 else "Instansi Pekanbaru"
+                        quota = int(job.get('quota', 1))
+                        applicants = int(job.get('total_applicant', job.get('applicant_count', 0)))
                         
-                        quota_match = re.search(r'Kuota\s*:\s*(\d+)', text_content, re.IGNORECASE)
-                        pelamar_match = re.search(r'Pelamar\s*:\s*(\d+)', text_content, re.IGNORECASE)
-                        
-                        real_quota = int(quota_match.group(1)) if quota_match else 1
-                        real_applicants = int(pelamar_match.group(1)) if pelamar_match else 0
-                        
-                        logo_url = default_logo
-                        try:
-                            img_elem = a_tag.query_selector("img")
-                            if img_elem:
-                                src = img_elem.get_attribute("src") or img_elem.get_attribute("data-src") or img_elem.get_attribute("srcset")
-                                if src:
-                                    src_clean = src.split(" ")[0]
-                                    logo_url = src_clean if src_clean.startswith("http") else f"https://maganghub.kemnaker.go.id{src_clean}"
-                        except:
-                            pass
-                        
-                        seen_links.add(full_link)
-                        extracted_jobs.append((title, company, "Kota Pekanbaru", real_quota, real_applicants, full_link, logo_url))
-                        new_items_in_this_page += 1
+                        # Ambil URL Logo Asli dari JSON API
+                        logo_url = job.get('company_logo') or job.get('logo') or default_logo
+                        if isinstance(job.get('company'), dict):
+                            logo_url = job.get('company', {}).get('logo_url') or logo_url
+                            
+                        if logo_url and not logo_url.startswith("http"):
+                            logo_url = f"https://maganghub.kemnaker.go.id{logo_url}"
+                            
+                        extracted_jobs.append((title, company, "Kota Pekanbaru", quota, applicants, full_link, logo_url))
+                else:
+                    break
+            except:
+                break
                 
-                current_page += 1
-            
-            browser.close()
-            
+            current_page += 1
+
+        # Fallback jika API internal mengubah endpoint: gunakan penarikan HTML ringan cepat (BeautifulSoup style)
         if not extracted_jobs:
-            status_box.update(label="⚠️ Gagal mengambil data (0 lowongan). Silakan coba lagi.", state="error")
+            status_box.update(label="⏳ Menggunakan jalur pemindaian HTML cepat...", state="running")
+            for page_num in range(1, 16):
+                web_url = f"https://maganghub.kemnaker.go.id/magang-nasional/lowongan?keyword=&city_id%5B0%5D%5Bid%5D={city_id}&city_id%5B0%5D%5Blabel%5D=Kota%20Pekanbaru&page={page_num}"
+                resp = requests.get(web_url, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    # Ambil data Next.js state (__NEXT_DATA__) yang tertanam di HTML
+                    match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', resp.text)
+                    if match:
+                        import json
+                        page_data = json.loads(match.group(1))
+                        props = page_data.get('props', {}).get('pageProps', {})
+                        vacancies = props.get('vacancies', {}).get('data', []) or props.get('initialState', {}).get('vacancies', [])
+                        
+                        for v in vacancies:
+                            t = v.get('title', 'Lowongan Pekanbaru')
+                            c = v.get('company_name', 'Instansi Pekanbaru')
+                            q = int(v.get('quota', 1))
+                            a = int(v.get('total_applicant', 0))
+                            l = f"https://maganghub.kemnaker.go.id/magang-nasional/lowongan/{v.get('id', '')}"
+                            logo = v.get('company_logo', default_logo)
+                            extracted_jobs.append((t, c, "Kota Pekanbaru", q, a, l, logo))
+
+        if not extracted_jobs:
+            status_box.update(label="⚠️ Gagal terhubung ke Kemnaker. Silakan tekan Refresh lagi.", state="error")
             return False, "Data kosong"
 
         conn = get_connection()
@@ -185,57 +152,14 @@ def scrape_all_225_maganghub_stable(status_box, progress_bar):
         
         progress_bar.progress(1.0)
         status_box.update(
-            label=f"✅ Selesai 100%! Berhasil mengunci total {inserted_count} data ASLI!",
+            label=f"✅ Selesai Kilat! Berhasil mengunci total {inserted_count} data ASLI!",
             state="complete"
         )
-        return True, f"Sukses menyinkronkan total {inserted_count} lowongan asli Pekanbaru!"
+        return True, f"Sukses menyinkronkan {inserted_count} lowongan asli Pekanbaru!"
         
     except Exception as e:
-        status_box.update(label=f"❌ Terjadi kesalahan jaringan/timeout: {str(e)}", state="error")
+        status_box.update(label=f"❌ Kesalahan: {str(e)}", state="error")
         return False, str(e)
-
-def refresh_favorites_live():
-    ensure_playwright_installed()
-    conn = get_connection()
-    fav_df = pd.read_sql_query("SELECT id, link FROM vacancies WHERE is_favorite = 1", conn)
-    conn.close()
-    
-    if fav_df.empty:
-        return False, "Tidak ada lowongan favorit untuk diperbarui."
-        
-    updated_count = 0
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
-            )
-            page = browser.new_page()
-            
-            conn = get_connection()
-            cursor = conn.cursor()
-            
-            for idx, row in fav_df.iterrows():
-                link = row['link']
-                if link:
-                    page.goto(link, timeout=20000, wait_until="domcontentloaded")
-                    page.wait_for_timeout(1200)
-                    
-                    body_text = page.locator("body").inner_text()
-                    pelamar_match = re.search(r'(?:Pelamar|Pendaftar)\s*:\s*(\d+)', body_text, re.IGNORECASE)
-                    
-                    if pelamar_match:
-                        real_live_applicants = int(pelamar_match.group(1))
-                        cursor.execute("UPDATE vacancies SET applicants = ? WHERE id = ?", (real_live_applicants, row['id']))
-                        updated_count += 1
-                    
-            conn.commit()
-            conn.close()
-            browser.close()
-            
-        return True, f"🔥 Berhasil memperbarui data pelamar asli pada {updated_count} lowongan favorit!"
-    except Exception as e:
-        return False, f"Gagal merefresh favorit: {str(e)}"
 
 # ==========================================
 # 3. STREAMLIT UI
@@ -323,9 +247,9 @@ with st.sidebar:
     st.caption("Monitoring Lowongan Magang Kemnaker Kota Pekanbaru.")
 
 if btn_fetch:
-    status_box = st.status("🔍 Menghubungkan & menyapu data Maganghub...", expanded=True)
+    status_box = st.status("🔍 Menyambung ke API Kemnaker...", expanded=True)
     progress_bar = st.progress(0)
-    ok, msg = scrape_all_225_maganghub_stable(status_box, progress_bar)
+    ok, msg = scrape_all_maganghub_api(status_box, progress_bar)
     if ok:
         st.toast(msg, icon="🎉")
         st.rerun()
@@ -424,19 +348,7 @@ with tab_all:
 with tab_fav:
     fav_df = pd.read_sql_query("SELECT * FROM vacancies WHERE is_favorite = 1", conn)
     
-    col_fav_title, col_fav_refresh = st.columns([4, 1.5])
-    with col_fav_title:
-        st.subheader("⭐ Daftar Lowongan Favorit Tersimpan")
-    with col_fav_refresh:
-        if st.button("🔄 Refresh Pelamar Asli", type="primary", use_container_width=True):
-            with st.spinner("Mengambil jumlah pelamar asli terkini dari Maganghub..."):
-                ok, msg = refresh_favorites_live()
-                if ok:
-                    st.toast(msg, icon="⚡")
-                else:
-                    st.warning(msg)
-                st.rerun()
-                
+    st.subheader("⭐ Daftar Lowongan Favorit Tersimpan")
     st.divider()
     
     if fav_df.empty:
